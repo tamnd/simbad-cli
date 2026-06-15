@@ -1,14 +1,18 @@
 package simbad
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/tamnd/any-cli/kit"
 )
 
 // These tests are offline: they exercise the URI driver's pure string functions
-// and the host wiring (mint, body, resolve), which need no network. The client's
-// HTTP behaviour is covered in simbad_test.go.
+// and the host wiring (domain info, register). The client's HTTP behaviour is
+// covered in simbad_test.go.
 
 func TestDomainInfo(t *testing.T) {
 	info := Domain{}.Info()
@@ -23,54 +27,196 @@ func TestDomainInfo(t *testing.T) {
 	}
 }
 
-func TestClassify(t *testing.T) {
-	cases := []struct{ in, typ, id string }{
-		{"wiki/Go", "page", "wiki/Go"},
-		{"/about/", "page", "about"},
-		{"https://" + Host + "/team/contact", "page", "team/contact"},
+func TestDomainRegister(t *testing.T) {
+	// kit.Open uses the registered Domain from the init() call.
+	_, err := kit.Open()
+	if err != nil {
+		t.Fatalf("kit.Open: %v", err)
+	}
+}
+
+func TestQueryObjects_handler(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"metadata": []map[string]interface{}{
+				{"name": "main_id", "datatype": "CHAR"},
+				{"name": "ra", "datatype": "DOUBLE"},
+				{"name": "dec", "datatype": "DOUBLE"},
+				{"name": "otype_txt", "datatype": "CHAR"},
+			},
+			"data": [][]interface{}{
+				{"M 31", 10.684, 41.269, "G"},
+				{"M 33", 23.462, 30.660, "G"},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	cfg := DefaultConfig()
+	cfg.BaseURL = ts.URL
+	cfg.Rate = 0
+	c := NewClient(cfg)
+
+	var got []*Object
+	err := queryObjects(context.Background(), queryInput{
+		Type:   "G",
+		Top:    5,
+		Client: c,
+	}, func(o *Object) error {
+		got = append(got, o)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("queryObjects: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d objects, want 2", len(got))
+	}
+	if got[0].MainID != "M 31" {
+		t.Errorf("got[0].MainID = %q, want M 31", got[0].MainID)
+	}
+}
+
+func TestGetObject_handler(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"metadata": []map[string]interface{}{
+				{"name": "main_id", "datatype": "CHAR"},
+				{"name": "ra", "datatype": "DOUBLE"},
+				{"name": "dec", "datatype": "DOUBLE"},
+				{"name": "otype_txt", "datatype": "CHAR"},
+				{"name": "z_value", "datatype": "DOUBLE"},
+				{"name": "rvz_radvel", "datatype": "DOUBLE"},
+			},
+			"data": [][]interface{}{
+				{"M 31", 10.684, 41.269, "G", -0.001001, -300.0},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	cfg := DefaultConfig()
+	cfg.BaseURL = ts.URL
+	cfg.Rate = 0
+	c := NewClient(cfg)
+
+	var got []*Object
+	err := getObject(context.Background(), objectInput{
+		Name:   "Andromeda",
+		Client: c,
+	}, func(o *Object) error {
+		got = append(got, o)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("getObject: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d objects, want 1", len(got))
+	}
+	if got[0].MainID != "M 31" {
+		t.Errorf("got[0].MainID = %q, want M 31", got[0].MainID)
+	}
+	if got[0].RadVel != -300.0 {
+		t.Errorf("got[0].RadVel = %v, want -300.0", got[0].RadVel)
+	}
+}
+
+func TestListStars_handler(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"metadata": []map[string]interface{}{
+				{"name": "main_id", "datatype": "CHAR"},
+				{"name": "ra", "datatype": "DOUBLE"},
+				{"name": "dec", "datatype": "DOUBLE"},
+				{"name": "otype_txt", "datatype": "CHAR"},
+			},
+			"data": [][]interface{}{
+				{"* alf Cen A", 219.9009, -60.8353, "*"},
+				{"* alf Cen B", 219.9009, -60.8353, "*"},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	cfg := DefaultConfig()
+	cfg.BaseURL = ts.URL
+	cfg.Rate = 0
+	c := NewClient(cfg)
+
+	var got []*Object
+	err := listStars(context.Background(), starsInput{
+		Top:    2,
+		Client: c,
+	}, func(o *Object) error {
+		got = append(got, o)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("listStars: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d objects, want 2", len(got))
+	}
+	if got[0].ObjectType != "*" {
+		t.Errorf("got[0].ObjectType = %q, want *", got[0].ObjectType)
+	}
+}
+
+func TestRawQuery_handler(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"metadata": []map[string]interface{}{
+				{"name": "main_id", "datatype": "CHAR"},
+				{"name": "ra", "datatype": "DOUBLE"},
+				{"name": "dec", "datatype": "DOUBLE"},
+				{"name": "otype_txt", "datatype": "CHAR"},
+			},
+			"data": [][]interface{}{
+				{"SN 1987A", 83.866, -69.269, "SNR"},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	cfg := DefaultConfig()
+	cfg.BaseURL = ts.URL
+	cfg.Rate = 0
+	c := NewClient(cfg)
+
+	var got []*Object
+	err := rawQuery(context.Background(), tapInput{
+		Query:  "SELECT main_id,ra,dec,otype_txt FROM basic WHERE main_id='SN 1987A'",
+		Client: c,
+	}, func(o *Object) error {
+		got = append(got, o)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("rawQuery: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d objects, want 1", len(got))
+	}
+	if got[0].MainID != "SN 1987A" {
+		t.Errorf("got[0].MainID = %q, want SN 1987A", got[0].MainID)
+	}
+}
+
+func TestEscapeSQL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"M 31", "M 31"},
+		{"O'Brien", "O''Brien"},
+		{"it's", "it''s"},
 	}
 	for _, tc := range cases {
-		typ, id, err := Domain{}.Classify(tc.in)
-		if err != nil || typ != tc.typ || id != tc.id {
-			t.Errorf("Classify(%q) = (%q, %q, %v), want (%q, %q, nil)",
-				tc.in, typ, id, err, tc.typ, tc.id)
+		got := escapeSQL(tc.in)
+		if got != tc.want {
+			t.Errorf("escapeSQL(%q) = %q, want %q", tc.in, got, tc.want)
 		}
-	}
-}
-
-func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("page", "wiki/Go")
-	want := "https://" + Host + "/wiki/Go"
-	if err != nil || got != want {
-		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
-	}
-}
-
-// TestHostWiring mounts the driver in a kit Host (the runtime ant drives) and
-// checks the round trip: a record mints to its URI, its body is readable, and a
-// bare id resolves back to the same URI. The init in domain.go registers the
-// domain, so kit.Open finds it.
-func TestHostWiring(t *testing.T) {
-	h, err := kit.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	p := &Page{ID: "wiki/Go", URL: "https://" + Host + "/wiki/Go", Title: "Go", Body: "Go is a language."}
-	u, err := h.Mint(p)
-	if err != nil {
-		t.Fatalf("Mint: %v", err)
-	}
-	if want := "simbad://page/wiki/Go"; u.String() != want {
-		t.Errorf("Mint = %q, want %q", u.String(), want)
-	}
-
-	if body, ok := h.Body(p); !ok || body == "" {
-		t.Errorf("Body = (%q, %v), want non-empty", body, ok)
-	}
-
-	got, err := h.ResolveOn("simbad", "about")
-	if err != nil || got.String() != "simbad://page/about" {
-		t.Errorf("ResolveOn = (%q, %v), want simbad://page/about", got.String(), err)
 	}
 }

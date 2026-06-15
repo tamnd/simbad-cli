@@ -1,62 +1,163 @@
 // Package simbad is the library behind the simbad command line:
-// the HTTP client, request shaping, and the typed data models for simbad.
+// the HTTP client, request shaping, and the typed data models for the
+// SIMBAD Astronomical Database at simbad.u-strasbg.fr.
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
 // transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
 package simbad
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
+	"net/url"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to simbad. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "simbad/dev (+https://github.com/tamnd/simbad-cli)"
-
 // Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at simbad.com; change it once you
-// know the real endpoints you want to read.
-const Host = "simbad.com"
+// domain.go claims.
+const Host = "simbad.u-strasbg.fr"
 
-// BaseURL is the root every request is built from.
-const BaseURL = "https://" + Host
+// tapURL is the TAP/ADQL synchronous query endpoint.
+const tapURL = "https://simbad.u-strasbg.fr/simbad/sim-tap/sync"
 
-// Client talks to simbad over HTTP.
-type Client struct {
-	HTTP      *http.Client
-	UserAgent string
-	// Rate is the minimum gap between requests. Zero means no pacing.
-	Rate    time.Duration
-	Retries int
+// DefaultUserAgent identifies the client to SIMBAD. A real, honest
+// User-Agent is both polite and the thing most likely to keep you unblocked.
+const DefaultUserAgent = "simbad-cli/0.1 (tamnd87@gmail.com)"
 
-	last time.Time
+// Object is one record from the SIMBAD basic table.
+type Object struct {
+	MainID     string  `json:"main_id"`
+	RA         float64 `json:"ra"`
+	Dec        float64 `json:"dec"`
+	ObjectType string  `json:"object_type"`
+	Redshift   float64 `json:"redshift,omitempty"`
+	RadVel     float64 `json:"radial_velocity,omitempty"`
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
-func NewClient() *Client {
-	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
+// Config holds all tunables for the Client.
+type Config struct {
+	BaseURL   string
+	UserAgent string
+	Rate      time.Duration
+	Timeout   time.Duration
+	Retries   int
+}
+
+// DefaultConfig returns safe, polite defaults.
+func DefaultConfig() Config {
+	return Config{
+		BaseURL:   tapURL,
+		Rate:      1 * time.Second,
+		Timeout:   30 * time.Second,
+		Retries:   2,
 		UserAgent: DefaultUserAgent,
-		Rate:      200 * time.Millisecond,
-		Retries:   5,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+// Client talks to SIMBAD over HTTP.
+type Client struct {
+	cfg  Config
+	http *http.Client
+	last time.Time
+}
+
+// NewClient returns a Client with DefaultConfig settings.
+func NewClient(cfg ...Config) *Client {
+	c := DefaultConfig()
+	if len(cfg) > 0 {
+		c = cfg[0]
+	}
+	return &Client{
+		cfg:  c,
+		http: &http.Client{Timeout: c.Timeout},
+	}
+}
+
+// --- TAP query helpers ---
+
+// tapResult holds raw TAP/ADQL response.
+type tapResult struct {
+	Metadata []struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Data [][]interface{} `json:"data"`
+}
+
+// toObjects converts TAP rows to Object slices.
+func (r tapResult) toObjects() []Object {
+	idx := map[string]int{}
+	for i, m := range r.Metadata {
+		idx[m.Name] = i
+	}
+	var objs []Object
+	for _, row := range r.Data {
+		o := Object{}
+		if i, ok := idx["main_id"]; ok && i < len(row) {
+			if s, ok := row[i].(string); ok {
+				o.MainID = s
+			}
+		}
+		if i, ok := idx["ra"]; ok && i < len(row) {
+			if f, ok := row[i].(float64); ok {
+				o.RA = f
+			}
+		}
+		if i, ok := idx["dec"]; ok && i < len(row) {
+			if f, ok := row[i].(float64); ok {
+				o.Dec = f
+			}
+		}
+		if i, ok := idx["otype_txt"]; ok && i < len(row) {
+			if s, ok := row[i].(string); ok {
+				o.ObjectType = s
+			}
+		}
+		if i, ok := idx["z_value"]; ok && i < len(row) {
+			if f, ok := row[i].(float64); ok {
+				o.Redshift = f
+			}
+		}
+		if i, ok := idx["rvz_radvel"]; ok && i < len(row) {
+			if f, ok := row[i].(float64); ok {
+				o.RadVel = f
+			}
+		}
+		objs = append(objs, o)
+	}
+	return objs
+}
+
+// QueryTAP executes an ADQL query and returns the matching objects.
+func (c *Client) QueryTAP(ctx context.Context, adql string) ([]Object, error) {
+	params := url.Values{}
+	params.Set("REQUEST", "doQuery")
+	params.Set("LANG", "ADQL")
+	params.Set("FORMAT", "json")
+	params.Set("QUERY", adql)
+
+	fullURL := c.cfg.BaseURL + "?" + params.Encode()
+
+	body, err := c.get(ctx, fullURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var tr tapResult
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return nil, fmt.Errorf("parse TAP response: %w", err)
+	}
+	return tr.toObjects(), nil
+}
+
+// get fetches url and returns the response body. It paces and retries according
+// to the client's settings.
+func (c *Client) get(ctx context.Context, rawURL string) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt <= c.Retries; attempt++ {
+	for attempt := 0; attempt <= c.cfg.Retries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -64,7 +165,7 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			case <-time.After(backoff(attempt)):
 			}
 		}
-		body, retry, err := c.do(ctx, url)
+		body, retry, err := c.do(ctx, rawURL)
 		if err == nil {
 			return body, nil
 		}
@@ -73,18 +174,18 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("get %s: %w", url, lastErr)
+	return nil, fmt.Errorf("get %s: %w", rawURL, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
+func (c *Client) do(ctx context.Context, rawURL string) (body []byte, retry bool, err error) {
 	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
-	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
 
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, true, err
 	}
@@ -106,10 +207,10 @@ func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, e
 
 // pace blocks until at least Rate has passed since the previous request.
 func (c *Client) pace() {
-	if c.Rate <= 0 {
+	if c.cfg.Rate <= 0 {
 		return
 	}
-	if wait := c.Rate - time.Since(c.last); wait > 0 {
+	if wait := c.cfg.Rate - time.Since(c.last); wait > 0 {
 		time.Sleep(wait)
 	}
 	c.last = time.Now()
@@ -123,78 +224,20 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on simbad.com. It is a stand-in for the typed records you
-// will model from the real simbad endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `simbad cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
-}
-
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
-	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
+// effectiveTop returns the effective TOP N: honours both --top and --limit
+// flags, picking the smaller non-zero value; defaults to 20.
+func effectiveTop(top, limit int) int {
+	switch {
+	case top > 0 && limit > 0:
+		if top < limit {
+			return top
 		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+		return limit
+	case top > 0:
+		return top
+	case limit > 0:
+		return limit
+	default:
+		return 20
 	}
-	return out, nil
-}
-
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
 }
