@@ -1,6 +1,6 @@
 title       = "simbad"
 baseURL     = "https://simbad-cli.tamnd.com/"
-description = "A command line for simbad."
+description = "Query the SIMBAD Astronomical Database from the command line."
 contentDir  = "content"
 outputDir   = "public"
 theme       = "tago-doks"

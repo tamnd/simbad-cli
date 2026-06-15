@@ -1,34 +1,33 @@
 ---
 title: "simbad"
-description: "A command line for simbad."
+description: "Query the SIMBAD Astronomical Database from the command line."
 heroTitle: "simbad, from the command line"
-heroLead: "A command line for simbad. One pure-Go binary, no API key, output that pipes into the rest of your tools, and a resource-URI driver other programs can address."
+heroLead: "Query millions of stars, galaxies, and nebulae in the SIMBAD Astronomical Database. One pure-Go binary, no API key, output that pipes into the rest of your tools."
 heroPrimaryURL: "/getting-started/quick-start/"
 heroPrimaryText: "Get started"
 ---
 
-`simbad` reads public simbad data over plain HTTPS, shapes it into
-clean records, and gets out of your way.
+`simbad` queries the SIMBAD Astronomical Database at simbad.u-strasbg.fr via
+ADQL/TAP over plain HTTPS. No API key, nothing to run alongside it.
 
 ```bash
-simbad page <path>            # fetch one page as a record
-simbad page <path> -o json    # as JSON, ready for jq
-simbad links <path>           # the pages it links to, each addressable
-simbad serve --addr :7777     # the same operations over HTTP
+simbad query --type G --top 10       # galaxies
+simbad stars --top 20                # stars
+simbad object "M 31"                 # look up Andromeda by name
+simbad tap "SELECT TOP 5 main_id,ra,dec,otype_txt FROM basic"  # raw ADQL
+simbad serve --addr :7777            # the same operations over HTTP
 ```
 
-There is nothing to sign up for and nothing to run alongside it. Output adapts
-to where it goes: an aligned table on your terminal, JSONL the moment you pipe
-it somewhere.
+Output adapts to where it goes: an aligned table on your terminal, JSONL the
+moment you pipe it somewhere.
 
 ## Two ways to use it
 
-- **As a command** for reading simbad by hand or in a script. Start with
+- **As a command** for querying SIMBAD by hand or in a script. Start with
   the [quick start](/getting-started/quick-start/).
 - **As a resource-URI driver** so a host like
-  [ant](https://github.com/tamnd/ant) can address simbad as
-  `simbad://` URIs and follow links across sites. See
-  [resource URIs](/guides/resource-uris/).
+  [ant](https://github.com/tamnd/ant) can address SIMBAD as
+  `simbad://` URIs. See [resource URIs](/guides/resource-uris/).
 
 Both are the same code: one operation, declared once, is a CLI command, an HTTP
 route, an MCP tool, and a URI dereference.
