@@ -176,7 +176,7 @@ func rawQuery(ctx context.Context, in tapInput, emit func(*Object) error) error 
 // --- helpers ---
 
 // escapeSQL escapes single quotes in a string for use in an ADQL literal.
-// SIMBAD's ADQL follows standard SQL escaping: a literal ' becomes ''.
+// SIMBAD's ADQL follows standard SQL escaping: a literal ' becomes ”.
 func escapeSQL(s string) string {
 	out := make([]byte, 0, len(s)+4)
 	for i := 0; i < len(s); i++ {
